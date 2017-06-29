@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: Skeleton - REPLACEME
+
+# Parameters:
+
+#   VpcName:
+#     Type: String
+#     Description: Name of the VPC stack
+
+
+# Mappings:
+
+#   Name:
+#     KeyFirstLevel:
+#       KeySecondLevel: value
+
+
+# Resources:
+
+#   MyInstance:
+#     Type: AWS::EC2::Instance
+#     Properties:
+#       ImageId: ami-e3c3b8f4
+#       InstanceType: t2.micro
+#       KeyName: 201610.2
+#       NetworkInterfaces:
+#         - AssociatePublicIpAddress: true
+#           DeleteOnTermination: true
+#           DeviceIndex: 0
+#           GroupSet:
+#             - !Ref MySecurityGroup
+#           SubnetId: !ImportValue {Sub: "${VpcName}-public-subnet-a"}
+
+#---
+
+# ...
+
+
+# Outputs:
+
+#   name:
+#     Value: !Ref MyResource
+#     Export:
+#       Name: !Sub "${AWS::StackName}-my-name"

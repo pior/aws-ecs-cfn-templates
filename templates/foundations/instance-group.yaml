@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: ELB/ASG in a VPC
+
+Parameters:
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the ECS instances.
+
+  DesiredCapacity:
+    Type: Number
+    Default: 1
+    Description: Desired number of instances that should be up.
+  MinSize:
+    Type: Number
+    Default: 1
+    Description: Minimum number of instances that should be up.
+  MaxSize:
+    Type: Number
+    Default: 4
+    Description: Maximum number of instances that should be up.
+
+  InstanceType:
+    Description: The EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues: [t2.micro]
+    ConstraintDescription: You can specify only t2.micro.
+
+# Mappings:
+
+
+Resources:
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+
+    Properties:
+      VPCZoneIdentifier:
+        - !ImportValue {Sub: "${VpcName}-public-subnet-a"}
+        - !ImportValue {Sub: "${VpcName}-public-subnet-b"}
+      AvailabilityZones:
+        - !ImportValue {Sub: "${VpcName}-public-zone-a"}
+        - !ImportValue {Sub: "${VpcName}-public-zone-b"}
+
+      LaunchConfigurationName: !Ref LaunchConfig
+
+      DesiredCapacity: !Ref DesiredCapacity
+      MaxSize: !Ref MaxSize
+      MinSize: !Ref MinSize
+
+      Tags:
+        - Key: VpcName
+          PropagateAtLaunch: true
+          Value: !Ref VpcName
+
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: 1
+        MinInstancesInService: 1
+        PauseTime: PT2M
+        WaitOnResourceSignals: false
+      AutoScalingScheduledAction:
+        IgnoreUnmodifiedGroupSizeProperties: true
+
+
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: ami-e3c3b8f4
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroups:
+        - !Ref SecurityGroup
+
+
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Default SecurityGroup for InstanceGroup
+      SecurityGroupIngress:
+      - FromPort: 80
+        IpProtocol: tcp
+        SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+        ToPort: 80
+      - CidrIp: 0.0.0.0/0
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      VpcId: !ImportValue {Sub: "${VpcName}-vpc"}
+
+
+  ElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      CrossZone: true
+      HealthCheck:
+        Target: HTTP:80/
+        Interval: 15
+        Timeout: 10
+        HealthyThreshold: 3
+        UnhealthyThreshold: 5
+      Listeners:
+        - LoadBalancerPort: 80
+          InstancePort: 80
+          Protocol: HTTP
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets:
+        - !ImportValue vpc1-public-subnet-a
+        - !ImportValue vpc1-public-subnet-b
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public ELB Security Group
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+      VpcId: !ImportValue vpc1-vpc
+
+
+#---
+
+# Outputs:

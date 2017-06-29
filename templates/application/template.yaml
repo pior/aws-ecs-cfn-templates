@@ -1,0 +1,312 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: App Service
+
+Parameters:
+
+  VpcName:
+    Type: String
+    Description: Name of the VPC stack
+
+  EcsCluster:
+    Type: String
+    Description: Name of the ECS Cluster
+
+  CertificateId:
+    Type: String
+    Description: Certificate ID to use for the HTTP endpoint (for CF)
+
+  CertificateArn:
+    Type: String
+    Description: Certificate ARN to use for the HTTP endpoint (for ELB)
+
+  DnsZoneName:
+    Type: String
+    Description: Existing Route53 zone to register the record in (host.XXX.XXX)
+
+  DnsRecordName:
+    Type: String
+    Description: Record name for this service (XXX.domain.com)
+
+  CloudfrontEnabled:
+    Type: String
+    Description: Whether to setup a Cloudfront distribution in front of the LB
+    AllowedValues: ['true', 'false']
+
+
+Conditions:
+  CloudfrontEnabled: !Equals [!Ref CloudfrontEnabled, 'true']
+
+
+Resources:
+
+#--- ECS
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: [ALBTargetGroup, ALBListener, ALBListenerHttps]
+    Properties:
+      Cluster: !Ref EcsCluster
+      DesiredCount: 1
+      LoadBalancers:
+      - ContainerName: http
+        ContainerPort: 80
+        TargetGroupArn: !Ref ALBTargetGroup
+      Role: !Ref ServiceRole
+      TaskDefinition: !Ref TaskDefinition
+
+  # Dummy Task definition
+  # DO NOT EDIT (it would otherwise auto deploy)
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Name: http
+          Cpu: 10
+          Essential: true
+          Image: nginx:alpine
+          Memory: 80
+          PortMappings:
+            - HostPort: 0
+              ContainerPort: 80
+
+#--- Logs
+
+  ServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref AWS::StackName
+      RetentionInDays: 7
+
+#--- ELB
+
+  ALBListener:
+    Type : AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref Elb
+      Port: 80
+      Protocol: HTTP
+
+  ALBListenerHttps:
+    Type : AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref Elb
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+
+  Elb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Ref AWS::StackName
+      Scheme: internet-facing
+      Subnets:
+        - Fn::ImportValue: !Sub "${VpcName}-public-subnet-a"
+        - Fn::ImportValue: !Sub "${VpcName}-public-subnet-b"
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: [Elb]
+    Properties:
+      Protocol: HTTP
+      Port: 80 # Ignored since overriden by ECS service random port
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcName}-vpc-id"
+
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckPath: /
+
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 10
+
+
+#--- Cloudfront
+
+  Cloudfront:
+    Type: AWS::CloudFront::Distribution
+    Condition: CloudfrontEnabled
+    Properties:
+      DistributionConfig:
+        Origins:
+        - DomainName: !GetAtt Elb.DNSName
+          Id: backend
+          CustomOriginConfig:
+            # HTTPPort: 80
+            # HTTPSPort: 443
+            OriginProtocolPolicy: http-only
+        Enabled: true
+        Comment: Application acceleration
+        # Logging:
+        #   IncludeCookies: true
+        #   Bucket: mylogs.s3.amazonaws.com
+        #   Prefix: myprefix
+        Aliases:
+          - host.domain.com       # TODO: EXTRACT THIS! 
+        DefaultCacheBehavior:
+          TargetOriginId: backend
+          DefaultTTL: 0  # This is kind of hackish
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: all
+          ViewerProtocolPolicy: allow-all
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          IamCertificateId: !Ref CertificateId
+          SslSupportMethod: sni-only  # vip is the other option (600$/month)
+
+#--- DNS
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Ref DnsZoneName
+      RecordSets:
+      - Name: !Sub "${DnsRecordName}.${DnsZoneName}"
+        Type: A
+        AliasTarget:
+          HostedZoneId: !If [CloudfrontEnabled, Z2FDTNDATAQYW2, !GetAtt Elb.CanonicalHostedZoneID]
+          DNSName: !If [CloudfrontEnabled, !GetAtt Cloudfront.DomainName, !GetAtt Elb.DNSName]
+      - Name: !Sub "${DnsRecordName}.${DnsZoneName}"
+        Type: AAAA
+        AliasTarget:
+          HostedZoneId: !If [CloudfrontEnabled, Z2FDTNDATAQYW2, !GetAtt Elb.CanonicalHostedZoneID]
+          DNSName: !If [CloudfrontEnabled, !GetAtt Cloudfront.DomainName, !GetAtt Elb.DNSName]
+
+#--- SG
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Service ELB SecurityGroup
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcName}-vpc-id"
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+
+  ClusterSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub "${EcsCluster}-sg-id"
+      SourceSecurityGroupId: !Ref ALBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 32768
+      ToPort: 65535
+
+#--- IAM
+
+  ServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:Describe*
+              - elasticloadbalancing:RegisterInstancesWithLoadBalancer
+              - elasticloadbalancing:DeregisterInstancesFromLoadBalancer
+              - elasticloadbalancing:RegisterTargets
+              - elasticloadbalancing:DeregisterTargets
+              - ec2:Describe*
+              - ec2:AuthorizeSecurityGroupIngress
+            Resource: "*"
+
+#-- DBs
+
+  ResourceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Resource SecurityGroup (DBs)
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcName}-vpc-id"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub "${EcsCluster}-sg-id"
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub "${EcsCluster}-sg-id"
+
+  RedisCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      Engine: redis
+      CacheNodeType: cache.t2.micro
+      NumCacheNodes: 1
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref ResourceSecurityGroup
+
+  RedisSubnetGroup:
+    Type: "AWS::ElastiCache::SubnetGroup"
+    Properties:
+      Description: "Cache Subnet Group"
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${VpcName}-public-subnet-a"
+        - Fn::ImportValue: !Sub "${VpcName}-public-subnet-b"
+
+  ElasticsearchDomain:
+    Type: "AWS::Elasticsearch::Domain"
+    Properties:
+      DomainName: !Ref AWS::StackName
+      ElasticsearchClusterConfig:
+        DedicatedMasterEnabled: false
+        InstanceCount: "1"
+        InstanceType: "t2.micro.elasticsearch"
+      EBSOptions:
+        EBSEnabled: true
+        VolumeSize: 20
+        VolumeType: "gp2"
+      AccessPolicies:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              AWS: "*"
+            Action: "es:*"
+            Resource: "*"
+      AdvancedOptions: {}
+
+
+# Outputs:
+
+#   name:
+#     Value: !Ref MyResource
+#     Export:
+#       Name: !Sub "${AWS::StackName}-my-name"

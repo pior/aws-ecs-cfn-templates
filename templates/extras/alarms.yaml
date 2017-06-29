@@ -1,0 +1,41 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: Alarms and Healthchecks
+
+Resources:
+
+  SystemErrorTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: system-error
+
+  DomainCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTP
+        FullyQualifiedDomainName: domain-to-check.com
+        ResourcePath: '/'
+        RequestInterval: 30
+        FailureThreshold: 3
+      HealthCheckTags:
+        - Key: Usage
+          Value: Monitoring
+
+  Alarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        ActionsEnabled: true
+        AlarmActions:
+          - !Ref SystemErrorTopic
+        AlarmDescription: !Sub "domain-to-check.com http check"
+        MetricName: HealthCheckStatus
+        Namespace: AWS/Route53
+        Statistic: Minimum
+        Period: 60
+        EvaluationPeriods: 1
+        ComparisonOperator: LessThanThreshold
+        Threshold: 1.0
+        Dimensions:
+          - Name: HealthCheckId
+            Value: !Ref DomainCheck

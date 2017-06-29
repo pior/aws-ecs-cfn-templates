@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: ELB/ASG in a VPC
+
+# Parameters:
+
+
+# Mappings:
+
+
+Resources:
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+
+      VPCZoneIdentifier:
+        - !ImportValue vpc1-public-subnet-a
+        - !ImportValue vpc1-public-subnet-b
+      AvailabilityZones:
+        - !ImportValue vpc1-public-zone-a
+        - !ImportValue vpc1-public-zone-b
+
+      LaunchConfigurationName: !Ref LaunchConfig
+      LoadBalancerNames:
+        - !Ref ElasticLoadBalancer
+
+      DesiredCapacity: 2
+      MaxSize: 10
+      MinSize: 1
+
+      Tags:
+        - {Key: Network, PropagateAtLaunch: 'true', Value: Public}
+
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: 1
+        MinInstancesInService: 1
+        PauseTime: PT2M
+        WaitOnResourceSignals: false
+
+
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: ami-e3c3b8f4
+      InstanceType: t2.micro
+      KeyName: 201610.2
+      SecurityGroups:
+        - !Ref WebServerSecurityGroup
+
+
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow access from load balancer and bastion as well as
+        outbound HTTP and HTTPS traffic
+      SecurityGroupIngress:
+      - FromPort: 80
+        IpProtocol: tcp
+        SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+        ToPort: 80
+      - CidrIp: 0.0.0.0/0
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      VpcId: !ImportValue vpc1-vpc
+
+
+  ElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      CrossZone: true
+      HealthCheck:
+        Target: HTTP:80/
+        Interval: 15
+        Timeout: 10
+        HealthyThreshold: 3
+        UnhealthyThreshold: 5
+      Listeners:
+        - LoadBalancerPort: 80
+          InstancePort: 80
+          Protocol: HTTP
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets:
+        - !ImportValue vpc1-public-subnet-a
+        - !ImportValue vpc1-public-subnet-b
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public ELB Security Group
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+      VpcId: !ImportValue vpc1-vpc
+
+
+#---
+
+# Outputs:

@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: ELB/ASG in a VPC
+
+Parameters:
+
+  VpcName:
+    Type: String
+    Description: Name of the VPC stack
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the ECS instances.
+
+  DesiredCapacity:
+    Type: Number
+    Default: 1
+    Description: Desired number of instances that should be up.
+  MinSize:
+    Type: Number
+    Default: 1
+    Description: Minimum number of instances that should be up.
+  MaxSize:
+    Type: Number
+    Default: 4
+    Description: Maximum number of instances that should be up.
+
+  InstanceType:
+    Description: The EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues: [t2.micro]
+    ConstraintDescription: You can specify only t2.micro.
+
+  GitlabRegistrationToken:
+    Description: The Gitlab CI registration token
+    Type: String
+
+  RunnerLimit:
+    Description: Max number of concurrent job ($RUNNER_LIMIT)
+    Type: Number
+    Default: 1
+
+  RunnerTagList:
+    Description: Comma separated tag list ($RUNNER_TAG_LIST)
+    Type: String
+    Default: ''
+
+# Mappings:
+
+
+Resources:
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+
+    Properties:
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${VpcName}-public-subnet-a"
+        - Fn::ImportValue: !Sub "${VpcName}-public-subnet-b"
+      AvailabilityZones:
+        - Fn::ImportValue: !Sub "${VpcName}-public-zone-a"
+        - Fn::ImportValue: !Sub "${VpcName}-public-zone-b"
+
+      LaunchConfigurationName: !Ref LaunchConfig
+
+      DesiredCapacity: !Ref DesiredCapacity
+      MaxSize: !Ref MaxSize
+      MinSize: !Ref MinSize
+
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+          PropagateAtLaunch: true
+        - Key: Vpc
+          Value: !Ref VpcName
+          PropagateAtLaunch: true
+
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: 1
+        MinInstancesInService: 1
+        PauseTime: PT2M
+        WaitOnResourceSignals: false
+      AutoScalingScheduledAction:
+        IgnoreUnmodifiedGroupSizeProperties: true
+
+
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: ami-4f0c4758
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroups:
+        - !Ref SecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/sde
+          Ebs:
+            VolumeSize: 50
+      UserData:
+        Fn::Base64: !Sub |
+          #cloud-config
+
+          apt_upgrade: true
+
+          fs_setup:
+            - filesystem: ext4
+              device: /dev/xvde
+              partition: none
+              overwrite: true
+
+          mounts:
+            - [ /dev/xvde, "/var/lib/docker", "ext4", "defaults,discard", "0", "2" ]
+
+          runcmd:
+           - echo "STACK_NAME=${AWS::StackName}" > /etc/instance.env
+           - wget -qO /tmp/docker.install.sh https://get.docker.com/
+           - wget -qO /tmp/gitlabcirunner.install.sh https://packages.gitlab.com/install/repositories/runner/gitlab-ci-multi-runner/script.deb.sh
+           - sh tmp/docker.install.sh
+           - bash /tmp/gitlabcirunner.install.sh
+           - apt-get install gitlab-ci-multi-runner
+           - export CI_SERVER_URL=https://gitlab.com/ci
+           - export REGISTRATION_TOKEN=${GitlabRegistrationToken}
+           - export RUNNER_TAG_LIST=${RunnerTagList}
+           - export RUNNER_LIMIT=${RunnerLimit}
+           - export RUNNER_EXECUTOR=docker
+           - export DOCKER_IMAGE=python:3.5
+           - export DOCKER_PRIVILEGED=1
+           - export DOCKER_VOLUMES="/var/run/docker.sock:/var/run/docker.sock"
+           - gitlab-ci-multi-runner register -n
+           - gitlab-ci-multi-runner restart
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Default SecurityGroup for InstanceGroup
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcName}-vpc"
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: CI
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:CompleteLayerUpload
+              - ecr:DescribeRepositories
+              - ecr:GetAuthorizationToken
+              - ecr:GetDownloadUrlForLayer
+              - ecr:GetRepositoryPolicy
+              - ecr:InitiateLayerUpload
+              - ecr:ListImages
+              - ecr:PutImage
+              - ecr:UploadLayerPart
+              - ecs:CreateService
+              - ecs:Describe*
+              - ecs:List*
+              - ecs:RegisterTaskDefinition
+              - ecs:UpdateService
+              - route53:Change*
+              - route53:Create*
+              - route53:Get*
+              - route53:List*
+              - route53:Update*
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: "*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+      - Ref: Role
+
+
+#---
+
+# Outputs:
